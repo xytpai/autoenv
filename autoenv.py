@@ -9,8 +9,8 @@ from tkinter import messagebox
 
 
 # TODO: config
-height = 420
-width = 450
+height = 460
+width = 520
 server_password_default = 'gta'
 run_file_endswith = '.sh'
 run_cmd = 'bash'
