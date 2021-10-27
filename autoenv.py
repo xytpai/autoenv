@@ -11,7 +11,7 @@ from tkinter import messagebox
 # TODO: config
 height = 460
 width = 520
-server_password_default = 'gta'
+server_password_default = '1'
 run_file_endswith = '.sh'
 run_cmd = 'bash'
 connection_timeout = 10
