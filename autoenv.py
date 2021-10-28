@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import time
 import paramiko
@@ -6,12 +7,13 @@ import fabric
 import tarfile
 from tkinter import *
 from tkinter import messagebox
+from threading import Thread
 
 
 # TODO: config
-height = 460
-width = 520
-server_password_default = '1'
+height = 600
+width = 700
+server_password_default = 'gta'
 run_file_endswith = '.sh'
 run_cmd = 'bash'
 connection_timeout = 10
@@ -51,12 +53,16 @@ def print_server_info(name):
     return name + ' ' + server['user'] + '@' + server['ip'] + ':' + server['port']
 
 
+# window
 window = Tk()
 window.title('autoenv')
 screenwidth = window.winfo_screenwidth()
 screenheight = window.winfo_screenheight()
 alignstr = '%dx%d+%d+%d' % (width, height, (screenwidth-width)/2, (screenheight-height)/2*0.8)
 window.geometry(alignstr)
+
+
+# frame_list
 frame_list = Frame()
 frame_list.pack(side=TOP, fill=BOTH, expand=True)
 list_envs, list_servers = Listbox(frame_list, exportselection=False), Listbox(frame_list, exportselection=False)
@@ -73,8 +79,30 @@ for name in envs: list_envs.insert('end', name)
 for name in servers.keys(): list_servers.insert(END, print_server_info(name))
 [list_servers.itemconfig(i, bg='#e0f0ff') for i in range(len(servers.keys())) if i%2]
 [list_envs.itemconfig(i, bg='#e0f0ff') for i in range(len(envs)) if i%2]
-info = StringVar(value='[please select machine][used/total]')
-lb_info = Label(textvariable=info).pack(side=TOP, fill=X)
+
+
+# frame_console
+frame_console = Frame()
+frame_console.pack(side=TOP, fill=BOTH, expand=True)
+console = Text(frame_console, fg='white', bg='black')
+scrollnar_console = Scrollbar(frame_console)
+console.config(yscrollcommand=scrollnar_console.set)
+scrollnar_console.config(command=console.yview)
+console.pack(side=LEFT, fill=BOTH, expand=True)
+scrollnar_console.pack(side=LEFT, fill=Y)
+class Redirector:
+    def __init__(self, text) -> None:
+        self.text = text
+    def write(self, string):
+        def write_():
+            self.text.insert('end', string)
+            self.text.see('end')
+        Thread(target=write_, daemon=True).start()
+    def flush(self): pass
+sys.stdout = Redirector(console)
+
+
+# frame_ctl
 frame_ctl = Frame(window).pack(side=TOP, fill=X, expand=False)
 lb_run = Label(frame_ctl, text='runfile: ').pack(side=LEFT)
 runfile_v = StringVar(value='run' + run_file_endswith)
@@ -84,7 +112,90 @@ password_v = StringVar(value=server_password_default)
 entry_password = Entry(frame_ctl, textvariable=password_v, show='*', width=12).pack(side=LEFT, fill=X, expand=True)
 
 
-def dispatch():
+def check():
+    try:
+        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
+        server = servers[server_name]
+    except: return False
+    conn = fabric.Connection(server['ip'], user=server['user'], 
+        port=int(server['port']), connect_kwargs={"password": password_v.get()}, 
+        connect_timeout=info_connection_timeout)
+    try: 
+        mem = conn.run('free -h | grep Mem', hide='stdout').stdout.strip().split(' ')
+        mem = [t for t in mem if len(t)>0]
+        disk = conn.run('df ~ -kh | grep G', hide='stdout').stdout.strip().split(' ')
+        disk = [t for t in disk if len(t)>0]
+    except:
+        messagebox.showinfo(title='error', message='connection: ' + server['ip'] + ':' + server['port'])
+        conn.close()
+        return False
+    mem_info = 'mem: ' + mem[2] + '/' + mem[1]
+    disk_info = 'disk: ' + disk[2] + '/' + disk[1]
+    print('[' + server_name + ']' + '[used/total] ' + mem_info + ', ' + disk_info)
+    conn.close()
+    return True
+btn_info = Button(frame_ctl, text='Info', bg='gray', command=check).pack(side=LEFT, fill=X, expand=True)
+
+
+def terminal():
+    try:
+        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
+        server = servers[server_name]
+    except: return
+    try: env = '~/' + list_envs.get(list_envs.curselection()).strip().replace('-', '/')
+    except: env = '~'
+    os.system('start cmd /k ssh -t -p ' + server['port'] + ' ' + server['user'] + '@' + server['ip'] + ' \" cd ' + env + '; bash --login\"')
+btn_terminal = Button(frame_ctl, text='Terminal', bg='gray', command=terminal).pack(side=LEFT, fill=X, expand=True)
+
+
+def auth():
+    try:
+        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
+        server = servers[server_name]
+    except: return
+    conn = fabric.Connection(server['ip'], user=server['user'], 
+        port=server['port'], connect_kwargs={"password": password_v.get()}, 
+        connect_timeout=connection_timeout)
+    try: 
+        pwd = conn.run('cd ~; pwd').stdout.strip()
+    except:
+        messagebox.showinfo(title='error', message='connection: ' + server['ip'] + ':' + server['port'])
+        conn.close()
+        return
+    join = os.path.join
+    pub_key = join(join(os.path.expanduser('~'), '.ssh'), 'id_rsa.pub')
+    if not os.path.exists(pub_key): os.system('ssh-keygen -t rsa')
+    remote_author_file = pwd + '/.ssh/authorized_keys'
+    local_author_file = 'authorized_keys-' + str(round(time.time()*1000))
+    try:
+        conn.get(remote_author_file, local_author_file)
+        with open(local_author_file, 'r') as f: lines = f.readlines()
+        lines = [t.strip() for t in lines if len(t)>5]
+    except: lines = []
+    with open(pub_key, 'r') as f: item = f.readlines()[0].strip()
+    if item in lines:
+        conn.close()
+        os.remove(local_author_file)
+        return
+    lines.append(item)
+    out = '\n'.join(lines)
+    with open(local_author_file, 'w') as f: f.write(out)
+    try:
+        conn.put(local_author_file, remote_author_file)
+        conn.run('chmod 600 {}'.format(remote_author_file))
+    except Exception as e:
+        messagebox.showinfo(title='error', message=str(e))
+        conn.close()
+        os.remove(local_author_file)
+        return
+    conn.close()
+    os.remove(local_author_file)
+    return
+btn_auth = Button(frame_ctl, text='Auth', bg='gray', command=auth).pack(side=LEFT, fill=X, expand=True)
+
+
+btn_dispatch = Button(frame_ctl, text='Dispatch', bg='gray')
+def dispatch_():
     try:
         env = list_envs.get(list_envs.curselection()).strip()
         server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
@@ -149,89 +260,14 @@ def dispatch():
         return
     messagebox.showinfo(title='success', message=server_name)
     conn.close()
+def dispatch():
+    def run():
+        btn_dispatch.config(state=DISABLED)
+        dispatch_()
+        btn_dispatch.config(state=NORMAL)
+    Thread(target=run, daemon=True).start()
+btn_dispatch.config(command=dispatch)
+btn_dispatch.pack(side=LEFT, fill=X, expand=True)
 
 
-def check():
-    try:
-        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
-        server = servers[server_name]
-    except: return False
-    conn = fabric.Connection(server['ip'], user=server['user'], 
-        port=int(server['port']), connect_kwargs={"password": password_v.get()}, 
-        connect_timeout=info_connection_timeout)
-    try: 
-        mem = conn.run('free -h | grep Mem', hide='stdout').stdout.strip().split(' ')
-        mem = [t for t in mem if len(t)>0]
-        disk = conn.run('df ~ -kh | grep G', hide='stdout').stdout.strip().split(' ')
-        disk = [t for t in disk if len(t)>0]
-    except:
-        messagebox.showinfo(title='error', message='connection: ' + server['ip'] + ':' + server['port'])
-        conn.close()
-        return False
-    mem_info = 'mem: ' + mem[2] + '/' + mem[1]
-    disk_info = 'disk: ' + disk[2] + '/' + disk[1]
-    info.set('[' + server_name + ']' + '[used/total] ' + mem_info + ', ' + disk_info)
-    conn.close()
-    return True
-
-
-def terminal():
-    try:
-        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
-        server = servers[server_name]
-    except: return
-    try: env = '~/' + list_envs.get(list_envs.curselection()).strip().replace('-', '/')
-    except: env = '~'
-    os.system('start cmd /k ssh -t -p ' + server['port'] + ' ' + server['user'] + '@' + server['ip'] + ' \" cd ' + env + '; bash --login\"')
-
-
-def auth():
-    try:
-        server_name = list_servers.get(list_servers.curselection()).split(' ')[0].strip()
-        server = servers[server_name]
-    except: return
-    conn = fabric.Connection(server['ip'], user=server['user'], 
-        port=server['port'], connect_kwargs={"password": password_v.get()}, 
-        connect_timeout=connection_timeout)
-    try: 
-        pwd = conn.run('cd ~; pwd').stdout.strip()
-    except:
-        messagebox.showinfo(title='error', message='connection: ' + server['ip'] + ':' + server['port'])
-        conn.close()
-        return
-    join = os.path.join
-    pub_key = join(join(os.path.expanduser('~'), '.ssh'), 'id_rsa.pub')
-    if not os.path.exists(pub_key): os.system('ssh-keygen -t rsa')
-    remote_author_file = pwd + '/.ssh/authorized_keys'
-    local_author_file = 'authorized_keys-' + str(round(time.time()*1000))
-    try:
-        conn.get(remote_author_file, local_author_file)
-        with open(local_author_file, 'r') as f: lines = f.readlines()
-        lines = [t.strip() for t in lines if len(t)>5]
-    except: lines = []
-    with open(pub_key, 'r') as f: item = f.readlines()[0].strip()
-    if item in lines:
-        conn.close()
-        os.remove(local_author_file)
-        return
-    lines.append(item)
-    out = '\n'.join(lines)
-    with open(local_author_file, 'w') as f: f.write(out)
-    try:
-        conn.put(local_author_file, remote_author_file)
-        conn.run('chmod 600 {}'.format(remote_author_file))
-    except Exception as e:
-        messagebox.showinfo(title='error', message=str(e))
-        conn.close()
-        os.remove(local_author_file)
-        return
-    conn.close()
-    os.remove(local_author_file)
-    return
-
-
-btn_info = Button(frame_ctl, text='Info', bg='gray', command=check).pack(side=LEFT, fill=X, expand=True)
-btn_auth = Button(frame_ctl, text='Auth', bg='gray', command=auth).pack(side=LEFT, fill=X, expand=True)
-btn_terminal = Button(frame_ctl, text='Terminal', bg='gray', command=terminal).pack(side=LEFT, fill=X, expand=True)
-btn_dispatch = Button(frame_ctl, text='Dispatch', bg='gray', command=dispatch).pack(side=LEFT, fill=X, expand=True)
 window.mainloop()
